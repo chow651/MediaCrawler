@@ -143,3 +143,49 @@ from .ks_config import *
 from .weibo_config import *
 from .tieba_config import *
 from .zhihu_config import *
+
+# ==================== 自适应延迟配置 ====================
+# 是否启用自适应请求频率控制
+ENABLE_ADAPTIVE_DELAY = True
+
+# 基础延迟秒数（替代原来的 CRAWLER_MAX_SLEEP_SEC）
+ADAPTIVE_BASE_DELAY = 2.0
+
+# 最小延迟秒数
+ADAPTIVE_MIN_DELAY = 0.5
+
+# 最大延迟秒数（触发限流时的最大退避）
+ADAPTIVE_MAX_DELAY = 30.0
+
+# 触发限流时的退避倍数
+ADAPTIVE_BACKOFF_FACTOR = 2.0
+
+# 连续成功后的恢复倍数
+ADAPTIVE_RECOVERY_FACTOR = 0.5
+
+# 触发恢复所需的连续成功次数
+ADAPTIVE_SUCCESS_THRESHOLD = 5
+
+# ==================== 断点续爬配置 ====================
+# 是否启用断点续爬
+ENABLE_CHECKPOINT = True
+
+# 断点文件存储目录
+CHECKPOINT_DIR = "checkpoint"
+
+# 每处理多少条记录保存一次断点
+CHECKPOINT_SAVE_INTERVAL = 10
+
+# ==================== 验证码处理配置 ====================
+# 是否启用验证码检测
+ENABLE_CAPTCHA_DETECTION = True
+
+# 验证码处理策略: pause(暂停等待人工), retry(刷新重试), skip(跳过当前), abort(终止)
+CAPTCHA_STRATEGY = "pause"
+
+# 暂停策略下的最大等待时间（秒）
+CAPTCHA_MAX_WAIT_TIME = 300
+
+# 重试策略下的最大重试次数
+CAPTCHA_MAX_RETRIES = 3
+
