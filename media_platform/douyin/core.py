@@ -66,8 +66,8 @@ class DouYinCrawler(AbstractCrawler):
         ]
         self.cdp_manager = None
         self.ip_proxy_pool = None  # Proxy IP pool for automatic proxy refresh
-        
-        # 初始化增强模块
+
+        # 增强模块
         self.delay_controller = None
         self.checkpoint_manager = None
         self.captcha_handler = None
@@ -104,17 +104,6 @@ class DouYinCrawler(AbstractCrawler):
 
             self.context_page = await self.browser_context.new_page()
             await self.context_page.goto(self.index_url)
-            
-            # 初始化验证码处理器
-            if config.ENABLE_CAPTCHA_DETECTION:
-                strategy = CaptchaStrategy(config.CAPTCHA_STRATEGY)
-                self.captcha_handler = CaptchaHandler(
-                    page=self.context_page,
-                    strategy=strategy,
-                    max_wait_time=config.CAPTCHA_MAX_WAIT_TIME,
-                    max_retries=config.CAPTCHA_MAX_RETRIES,
-                )
-                utils.logger.info(f"[DouYinCrawler] 验证码检测已启用，策略: {strategy.value}")
 
             self.dy_client = await self.create_douyin_client(httpx_proxy_format)
             if not await self.dy_client.pong(browser_context=self.browser_context):
@@ -130,14 +119,6 @@ class DouYinCrawler(AbstractCrawler):
                     browser_context=self.browser_context,
                     urls=self.cookie_urls,
                 )
-            
-            # 检查登录后的验证码
-            if self.captcha_handler:
-                can_continue = await self.captcha_handler.handle_captcha()
-                if not can_continue:
-                    utils.logger.error("[DouYinCrawler] 登录后验证码处理失败，终止")
-                    return
-            
             crawler_type_var.set(config.CRAWLER_TYPE)
             if config.CRAWLER_TYPE == "search":
                 # Search for notes and retrieve their comment information.
@@ -149,19 +130,14 @@ class DouYinCrawler(AbstractCrawler):
                 # Get the information and comments of the specified creator
                 await self.get_creators_and_videos()
 
-            # 保存断点并输出统计
+            # 输出统计信息
             if self.checkpoint_manager:
                 self.checkpoint_manager.save_and_close()
                 stats = self.checkpoint_manager.get_stats()
                 utils.logger.info(f"[DouYinCrawler] 断点统计: {stats}")
-            
             if self.delay_controller:
                 stats = self.delay_controller.get_stats()
                 utils.logger.info(f"[DouYinCrawler] 延迟统计: {stats}")
-            
-            if self.captcha_handler:
-                stats = self.captcha_handler.get_stats()
-                utils.logger.info(f"[DouYinCrawler] 验证码统计: {stats}")
 
             utils.logger.info("[DouYinCrawler.start] Douyin Crawler finished ...")
 
@@ -171,8 +147,8 @@ class DouYinCrawler(AbstractCrawler):
         if config.CRAWLER_MAX_NOTES_COUNT < dy_limit_count:
             config.CRAWLER_MAX_NOTES_COUNT = dy_limit_count
         start_page = config.START_PAGE  # start page number
-        
-        # 初始化断点管理器
+
+        # 初始化增强模块
         if config.ENABLE_CHECKPOINT:
             self.checkpoint_manager = CheckpointManager(
                 platform="dy",
@@ -180,23 +156,24 @@ class DouYinCrawler(AbstractCrawler):
                 checkpoint_dir=config.CHECKPOINT_DIR,
                 save_interval=config.CHECKPOINT_SAVE_INTERVAL,
             )
-        
-        # 初始化延迟控制器
         if config.ENABLE_ADAPTIVE_DELAY:
             self.delay_controller = AdaptiveDelay(
                 base_delay=config.ADAPTIVE_BASE_DELAY,
                 min_delay=config.ADAPTIVE_MIN_DELAY,
                 max_delay=config.ADAPTIVE_MAX_DELAY,
-                backoff_factor=config.ADAPTIVE_BACKOFF_FACTOR,
-                recovery_factor=config.ADAPTIVE_RECOVERY_FACTOR,
-                success_threshold=config.ADAPTIVE_SUCCESS_THRESHOLD,
             )
-        
+
         for keyword in config.KEYWORDS.split(","):
             source_keyword_var.set(keyword)
             utils.logger.info(f"[DouYinCrawler.search] Current keyword: {keyword}")
             aweme_list: List[str] = []
             page = 0
+            # 断点恢复：读取该关键词的搜索偏移量
+            if self.checkpoint_manager:
+                saved_offset = self.checkpoint_manager.get_search_offset(keyword)
+                if saved_offset > 0:
+                    page = saved_offset // dy_limit_count
+                    utils.logger.info(f"[DouYinCrawler.search] 从断点恢复 keyword={keyword} page={page}")
             dy_search_id = ""
             while (page - start_page + 1) * dy_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
                 if page < start_page:
@@ -205,231 +182,379 @@ class DouYinCrawler(AbstractCrawler):
                     continue
                 try:
                     utils.logger.info(f"[DouYinCrawler.search] search douyin keyword: {keyword}, page: {page}")
-                    
+
                     # 自适应延迟
                     if self.delay_controller:
                         await self.delay_controller.wait()
-                    
+
                     posts_res = await self.dy_client.search_info_by_keyword(
                         keyword=keyword,
                         offset=page * dy_limit_count - dy_limit_count,
                         publish_time=PublishTimeType(config.PUBLISH_TIME_TYPE),
                         search_id=dy_search_id,
                     )
-                    
-                    # 检查验证码
-                    if self.captcha_handler:
-                        can_continue = await self.captcha_handler.handle_captcha()
-                        if not can_continue:
-                            utils.logger.warning("[DouYinCrawler.search] 验证码处理失败，跳过当前批次")
-                            break
-                    
-                    # 请求成功，更新延迟控制器
+                    if posts_res.get("data") is None or posts_res.get("data") == []:
+                        utils.logger.info(f"[DouYinCrawler.search] search douyin keyword: {keyword}, page: {page} is empty,{posts_res.get('data')}`")
+                        break
+                except DataFetchError as e:
+                    utils.logger.error(f"[DouYinCrawler.search] search douyin keyword: {keyword} failed, error: {e}")
                     if self.delay_controller:
-                        self.delay_controller.on_success()
-                    
-                except Exception as e:
-                    utils.logger.error(f"[DouYinCrawler.search] Error: {e}")
-                    
-                    # 请求失败，更新延迟控制器
-                    if self.delay_controller:
-                        self.delay_controller.on_error()
-                    
-                    # 检查是否是验证码导致的错误
-                    if self.captcha_handler:
-                        can_continue = await self.captcha_handler.handle_captcha()
-                        if not can_continue:
-                            break
-                    
-                    page += 1
-                    continue
-                
-                page += 1
-                dy_search_id = posts_res.get("log_pb", {}).get("impr_id", "")
-                
-                utils.logger.info(
-                    f"[DouYinCrawler.search] Keyword: {keyword}, "
-                    f"Page: {page}, Got {len(aweme_list)} posts"
-                )
-            
-            utils.logger.info(
-                f"[DouYinCrawler.search] Finished keyword: {keyword}, "
-                f"Total: {len(aweme_list)} posts"
-            )
+                        status_code = getattr(e, "status_code", 0)
+                        self.delay_controller.on_error(status_code=status_code)
+                    break
 
-    async def get_specified_awemes(self) -> None:
-        """Get the information and comments of the specified post"""
-        utils.logger.info("[DouYinCrawler.get_specified_awemes] Begin")
-        
-        # 初始化断点管理器
-        if config.ENABLE_CHECKPOINT:
-            self.checkpoint_manager = CheckpointManager(
-                platform="dy",
-                crawler_type="detail",
-                checkpoint_dir=config.CHECKPOINT_DIR,
-                save_interval=config.CHECKPOINT_SAVE_INTERVAL,
-            )
-        
-        # 初始化延迟控制器
-        if config.ENABLE_ADAPTIVE_DELAY:
-            self.delay_controller = AdaptiveDelay(
-                base_delay=config.ADAPTIVE_BASE_DELAY,
-                min_delay=config.ADAPTIVE_MIN_DELAY,
-                max_delay=config.ADAPTIVE_MAX_DELAY,
-                backoff_factor=config.ADAPTIVE_BACKOFF_FACTOR,
-                recovery_factor=config.ADAPTIVE_RECOVERY_FACTOR,
-                success_threshold=config.ADAPTIVE_SUCCESS_THRESHOLD,
-            )
-        
-        for aweme_url in config.DY_SPECIFIED_ID_LIST:
-            aweme_id = parse_video_info_from_url(aweme_url)
-            if not aweme_id:
-                utils.logger.warning(f"[DouYinCrawler.get_specified_awemes] Invalid URL: {aweme_url}")
-                continue
-            
-            # 断点检查
-            if self.checkpoint_manager and self.checkpoint_manager.is_processed(aweme_id):
-                utils.logger.info(f"[DouYinCrawler.get_specified_awemes] Skip processed: {aweme_id}")
-                continue
-            
-            try:
-                # 自适应延迟
-                if self.delay_controller:
-                    await self.delay_controller.wait()
-                
-                aweme_info = await self.dy_client.get_aweme_detail(aweme_id)
-                
-                # 请求成功，更新延迟控制器
+                # 请求成功
                 if self.delay_controller:
                     self.delay_controller.on_success()
-                
-                # 检查验证码
-                if self.captcha_handler:
-                    can_continue = await self.captcha_handler.handle_captcha()
-                    if not can_continue:
-                        break
-                
-                if aweme_info:
-                    await douyin_store.save_aweme(aweme_info)
-                    
+
+                page += 1
+                if "data" not in posts_res:
+                    utils.logger.error(f"[DouYinCrawler.search] search douyin keyword: {keyword} failed，账号也许被风控了。")
+                    break
+                dy_search_id = posts_res.get("extra", {}).get("logid", "")
+                page_aweme_list = []
+                for post_item in posts_res.get("data"):
+                    try:
+                        aweme_info: Dict = (post_item.get("aweme_info") or post_item.get("aweme_mix_info", {}).get("mix_items")[0])
+                    except TypeError:
+                        continue
+                    aweme_id = aweme_info.get("aweme_id", "")
+
+                    # 断点检查：跳过已处理的
+                    if self.checkpoint_manager and self.checkpoint_manager.is_processed(aweme_id):
+                        utils.logger.debug(f"[DouYinCrawler.search] Skip processed: {aweme_id}")
+                        continue
+
+                    aweme_list.append(aweme_id)
+                    page_aweme_list.append(aweme_id)
+                    await douyin_store.update_douyin_aweme(aweme_item=aweme_info)
+                    await self.get_aweme_media(aweme_item=aweme_info)
+
                     # 标记为已处理
                     if self.checkpoint_manager:
                         self.checkpoint_manager.mark_processed(aweme_id)
-                    
-                    # 获取评论
-                    if config.ENABLE_GET_COMMENTS:
-                        comments = await self.dy_client.get_aweme_comments(aweme_id)
-                        for comment in comments:
-                            await douyin_store.save_comment(aweme_id, comment)
                 
-            except Exception as e:
-                utils.logger.error(f"[DouYinCrawler.get_specified_awemes] Error for {aweme_id}: {e}")
-                
-                # 请求失败，更新延迟控制器
-                if self.delay_controller:
-                    self.delay_controller.on_error()
-                
-                # 检查是否是验证码导致的错误
-                if self.captcha_handler:
-                    can_continue = await self.captcha_handler.handle_captcha()
-                    if not can_continue:
-                        break
-        
-        utils.logger.info("[DouYinCrawler.get_specified_awemes] Finished")
+                # Batch get note comments for the current page
+                await self.batch_get_note_comments(page_aweme_list)
+
+                # Sleep after each page navigation
+                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
+                utils.logger.info(f"[DouYinCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
+
+                # 断点保存：记录搜索进度
+                if self.checkpoint_manager:
+                    self.checkpoint_manager.set_search_state(keyword, page * dy_limit_count)
+
+            utils.logger.info(f"[DouYinCrawler.search] keyword:{keyword}, aweme_list:{aweme_list}")
+
+    async def get_specified_awemes(self):
+        """Get the information and comments of the specified post from URLs or IDs"""
+        utils.logger.info("[DouYinCrawler.get_specified_awemes] Parsing video URLs...")
+        aweme_id_list = []
+        for video_url in config.DY_SPECIFIED_ID_LIST:
+            try:
+                video_info = parse_video_info_from_url(video_url)
+
+                # Handling short links
+                if video_info.url_type == "short":
+                    utils.logger.info(f"[DouYinCrawler.get_specified_awemes] Resolving short link: {video_url}")
+                    resolved_url = await self.dy_client.resolve_short_url(video_url)
+                    if resolved_url:
+                        # Extract video ID from parsed URL
+                        video_info = parse_video_info_from_url(resolved_url)
+                        utils.logger.info(f"[DouYinCrawler.get_specified_awemes] Short link resolved to aweme ID: {video_info.aweme_id}")
+                    else:
+                        utils.logger.error(f"[DouYinCrawler.get_specified_awemes] Failed to resolve short link: {video_url}")
+                        continue
+
+                aweme_id_list.append(video_info.aweme_id)
+                utils.logger.info(f"[DouYinCrawler.get_specified_awemes] Parsed aweme ID: {video_info.aweme_id} from {video_url}")
+            except ValueError as e:
+                utils.logger.error(f"[DouYinCrawler.get_specified_awemes] Failed to parse video URL: {e}")
+                continue
+
+        semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
+        task_list = [self.get_aweme_detail(aweme_id=aweme_id, semaphore=semaphore) for aweme_id in aweme_id_list]
+        aweme_details = await asyncio.gather(*task_list)
+        for aweme_detail in aweme_details:
+            if aweme_detail is not None:
+                await douyin_store.update_douyin_aweme(aweme_item=aweme_detail)
+                await self.get_aweme_media(aweme_item=aweme_detail)
+        await self.batch_get_note_comments(aweme_id_list)
+
+    async def get_aweme_detail(self, aweme_id: str, semaphore: asyncio.Semaphore) -> Any:
+        """Get note detail"""
+        async with semaphore:
+            try:
+                result = await self.dy_client.get_video_by_id(aweme_id)
+                # Sleep after fetching aweme detail
+                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
+                utils.logger.info(f"[DouYinCrawler.get_aweme_detail] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching aweme {aweme_id}")
+                return result
+            except DataFetchError as ex:
+                utils.logger.error(f"[DouYinCrawler.get_aweme_detail] Get aweme detail error: {ex}")
+                return None
+            except KeyError as ex:
+                utils.logger.error(f"[DouYinCrawler.get_aweme_detail] have not fund note detail aweme_id:{aweme_id}, err: {ex}")
+                return None
+
+    async def batch_get_note_comments(self, aweme_list: List[str]) -> None:
+        """
+        Batch get note comments
+        """
+        if not config.ENABLE_GET_COMMENTS:
+            utils.logger.info(f"[DouYinCrawler.batch_get_note_comments] Crawling comment mode is not enabled")
+            return
+
+        task_list: List[Task] = []
+        semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
+        for aweme_id in aweme_list:
+            task = asyncio.create_task(self.get_comments(aweme_id, semaphore), name=aweme_id)
+            task_list.append(task)
+        if len(task_list) > 0:
+            await asyncio.wait(task_list)
+
+    async def get_comments(self, aweme_id: str, semaphore: asyncio.Semaphore) -> None:
+        async with semaphore:
+            try:
+                # Pass the list of keywords to the get_aweme_all_comments method
+                # Use fixed crawling interval
+                crawl_interval = config.CRAWLER_MAX_SLEEP_SEC
+                await self.dy_client.get_aweme_all_comments(
+                    aweme_id=aweme_id,
+                    crawl_interval=crawl_interval,
+                    is_fetch_sub_comments=config.ENABLE_GET_SUB_COMMENTS,
+                    callback=douyin_store.batch_update_dy_aweme_comments,
+                    max_count=config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
+                )
+                # Sleep after fetching comments
+                await asyncio.sleep(crawl_interval)
+                utils.logger.info(f"[DouYinCrawler.get_comments] Sleeping for {crawl_interval} seconds after fetching comments for aweme {aweme_id}")
+                utils.logger.info(f"[DouYinCrawler.get_comments] aweme_id: {aweme_id} comments have all been obtained and filtered ...")
+            except DataFetchError as e:
+                utils.logger.error(f"[DouYinCrawler.get_comments] aweme_id: {aweme_id} get comments failed, error: {e}")
 
     async def get_creators_and_videos(self) -> None:
-        """Get the information and comments of the specified creator"""
-        utils.logger.info("[DouYinCrawler.get_creators_and_videos] Begin")
-        
-        # 初始化断点管理器
-        if config.ENABLE_CHECKPOINT:
-            self.checkpoint_manager = CheckpointManager(
-                platform="dy",
-                crawler_type="creator",
-                checkpoint_dir=config.CHECKPOINT_DIR,
-                save_interval=config.CHECKPOINT_SAVE_INTERVAL,
-            )
-        
-        # 初始化延迟控制器
-        if config.ENABLE_ADAPTIVE_DELAY:
-            self.delay_controller = AdaptiveDelay(
-                base_delay=config.ADAPTIVE_BASE_DELAY,
-                min_delay=config.ADAPTIVE_MIN_DELAY,
-                max_delay=config.ADAPTIVE_MAX_DELAY,
-                backoff_factor=config.ADAPTIVE_BACKOFF_FACTOR,
-                recovery_factor=config.ADAPTIVE_RECOVERY_FACTOR,
-                success_threshold=config.ADAPTIVE_SUCCESS_THRESHOLD,
-            )
-        
+        """
+        Get the information and videos of the specified creator from URLs or IDs
+        """
+        utils.logger.info("[DouYinCrawler.get_creators_and_videos] Begin get douyin creators")
+        utils.logger.info("[DouYinCrawler.get_creators_and_videos] Parsing creator URLs...")
+
+        # 计算今天的日期（时间戳）
+        import time
+        today_start = int(time.time()) - 86400  # 24小时前的时间戳
+
         for creator_url in config.DY_CREATOR_ID_LIST:
-            sec_user_id = parse_creator_info_from_url(creator_url)
-            if not sec_user_id:
-                utils.logger.warning(f"[DouYinCrawler.get_creators_and_videos] Invalid URL: {creator_url}")
-                continue
-            
-            # 断点检查
-            if self.checkpoint_manager and self.checkpoint_manager.is_processed(sec_user_id):
-                utils.logger.info(f"[DouYinCrawler.get_creators_and_videos] Skip processed: {sec_user_id}")
-                continue
-            
             try:
-                # 自适应延迟
-                if self.delay_controller:
-                    await self.delay_controller.wait()
-                
-                # 获取创作者信息
-                creator_info = await self.dy_client.get_creator_info(sec_user_id)
-                
-                # 请求成功，更新延迟控制器
-                if self.delay_controller:
-                    self.delay_controller.on_success()
-                
-                # 检查验证码
-                if self.captcha_handler:
-                    can_continue = await self.captcha_handler.handle_captcha()
-                    if not can_continue:
-                        break
-                
-                if creator_info:
-                    await douyin_store.save_creator(creator_info)
-                    
-                    # 获取创作者的视频列表
-                    aweme_list = await self.dy_client.get_creator_videos(sec_user_id)
-                    
-                    for aweme_info in aweme_list:
-                        aweme_id = aweme_info.get("aweme_id")
-                        
-                        # 断点检查
-                        if self.checkpoint_manager and self.checkpoint_manager.is_processed(aweme_id):
-                            continue
-                        
-                        await douyin_store.save_aweme(aweme_info)
-                        
-                        # 标记为已处理
-                        if self.checkpoint_manager:
-                            self.checkpoint_manager.mark_processed(aweme_id)
-                        
-                        # 获取评论
-                        if config.ENABLE_GET_COMMENTS:
-                            comments = await self.dy_client.get_aweme_comments(aweme_id)
-                            for comment in comments:
-                                await douyin_store.save_comment(aweme_id, comment)
-                    
-                    # 标记创作者为已处理
-                    if self.checkpoint_manager:
-                        self.checkpoint_manager.mark_processed(sec_user_id)
-                
-            except Exception as e:
-                utils.logger.error(f"[DouYinCrawler.get_creators_and_videos] Error for {sec_user_id}: {e}")
-                
-                # 请求失败，更新延迟控制器
-                if self.delay_controller:
-                    self.delay_controller.on_error()
-                
-                # 检查是否是验证码导致的错误
-                if self.captcha_handler:
-                    can_continue = await self.captcha_handler.handle_captcha()
-                    if not can_continue:
-                        break
-        
-        utils.logger.info("[DouYinCrawler.get_creators_and_videos] Finished")
+                creator_info_parsed = parse_creator_info_from_url(creator_url)
+                user_id = creator_info_parsed.sec_user_id
+                utils.logger.info(f"[DouYinCrawler.get_creators_and_videos] Parsed sec_user_id: {user_id} from {creator_url}")
+            except ValueError as e:
+                utils.logger.error(f"[DouYinCrawler.get_creators_and_videos] Failed to parse creator URL: {e}")
+                continue
+
+            creator_info: Dict = await self.dy_client.get_user_info(user_id)
+            if creator_info:
+                await douyin_store.save_creator(user_id, creator=creator_info)
+
+            # Get all video information of the creator
+            all_video_list = await self.dy_client.get_all_user_aweme_posts(sec_user_id=user_id, callback=self.fetch_creator_video_detail)
+
+            utils.logger.info(f"[DouYinCrawler.get_creators_and_videos] Got {len(all_video_list)} videos from API")
+
+            # 筛选今天发布的视频
+            today_videos = []
+            for video_item in all_video_list:
+                create_time = video_item.get("create_time", 0)
+                if create_time >= today_start:
+                    today_videos.append(video_item)
+                    utils.logger.info(f"[DouYinCrawler.get_creators_and_videos] ✅ Found today's video: {video_item.get('aweme_id')}")
+
+            utils.logger.info(f"[DouYinCrawler.get_creators_and_videos] Found {len(today_videos)} videos from today out of {len(all_video_list)} total")
+
+            video_ids = [video_item.get("aweme_id") for video_item in today_videos]
+            utils.logger.info(f"[DouYinCrawler.get_creators_and_videos] Will fetch comments for {len(video_ids)} videos: {video_ids}")
+
+            if video_ids:
+                utils.logger.info(f"[DouYinCrawler.get_creators_and_videos] Calling batch_get_note_comments...")
+                await self.batch_get_note_comments(video_ids)
+                utils.logger.info(f"[DouYinCrawler.get_creators_and_videos] batch_get_note_comments completed")
+            else:
+                utils.logger.warning(f"[DouYinCrawler.get_creators_and_videos] No today's videos found, skipping comments")
+
+    async def fetch_creator_video_detail(self, video_list: List[Dict]):
+        """
+        Concurrently obtain the specified post list and save the data
+        """
+        semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
+        task_list = [self.get_aweme_detail(post_item.get("aweme_id"), semaphore) for post_item in video_list]
+
+        note_details = await asyncio.gather(*task_list)
+        for aweme_item in note_details:
+            if aweme_item is not None:
+                await douyin_store.update_douyin_aweme(aweme_item=aweme_item)
+                await self.get_aweme_media(aweme_item=aweme_item)
+
+    async def create_douyin_client(self, httpx_proxy: Optional[str]) -> DouYinClient:
+        """Create douyin client"""
+        cookie_str, cookie_dict = await utils.convert_browser_context_cookies(
+            self.browser_context,
+            urls=self.cookie_urls,
+        )  # type: ignore
+        douyin_client = DouYinClient(
+            proxy=httpx_proxy,
+            headers={
+                "User-Agent": await self.context_page.evaluate("() => navigator.userAgent"),
+                "Cookie": cookie_str,
+                "Host": "www.douyin.com",
+                "Origin": "https://www.douyin.com/",
+                "Referer": "https://www.douyin.com/",
+                "Content-Type": "application/json;charset=UTF-8",
+            },
+            playwright_page=self.context_page,
+            cookie_dict=cookie_dict,
+            proxy_ip_pool=self.ip_proxy_pool,  # Pass proxy pool for automatic refresh
+        )
+        return douyin_client
+
+    async def launch_browser(
+        self,
+        chromium: BrowserType,
+        playwright_proxy: Optional[Dict],
+        user_agent: Optional[str],
+        headless: bool = True,
+    ) -> BrowserContext:
+        """Launch browser and create browser context"""
+        if config.SAVE_LOGIN_STATE:
+            user_data_dir = os.path.join(os.getcwd(), "browser_data", config.USER_DATA_DIR % config.PLATFORM)  # type: ignore
+            browser_context = await chromium.launch_persistent_context(
+                user_data_dir=user_data_dir,
+                accept_downloads=True,
+                headless=headless,
+                proxy=playwright_proxy,  # type: ignore
+                viewport={
+                    "width": 1920,
+                    "height": 1080
+                },
+                user_agent=user_agent,
+            )  # type: ignore
+            return browser_context
+        else:
+            browser = await chromium.launch(headless=headless, proxy=playwright_proxy)  # type: ignore
+            browser_context = await browser.new_context(viewport={"width": 1920, "height": 1080}, user_agent=user_agent)
+            return browser_context
+
+    async def launch_browser_with_cdp(
+        self,
+        playwright: Playwright,
+        playwright_proxy: Optional[Dict],
+        user_agent: Optional[str],
+        headless: bool = True,
+    ) -> BrowserContext:
+        """
+        使用CDP模式启动浏览器
+        """
+        try:
+            self.cdp_manager = CDPBrowserManager()
+            browser_context = await self.cdp_manager.launch_and_connect(
+                playwright=playwright,
+                playwright_proxy=playwright_proxy,
+                user_agent=user_agent,
+                headless=headless,
+            )
+
+            # Add anti-detection script
+            await self.cdp_manager.add_stealth_script()
+
+            # Show browser information
+            browser_info = await self.cdp_manager.get_browser_info()
+            utils.logger.info(f"[DouYinCrawler] CDP浏览器信息: {browser_info}")
+
+            return browser_context
+
+        except Exception as e:
+            utils.logger.error(f"[DouYinCrawler] CDP模式启动失败，回退到标准模式: {e}")
+            # Fall back to standard mode
+            chromium = playwright.chromium
+            return await self.launch_browser(chromium, playwright_proxy, user_agent, headless)
+
+    async def close(self) -> None:
+        """Close browser context"""
+        # If you use CDP mode, special processing is required
+        if self.cdp_manager:
+            await self.cdp_manager.cleanup()
+            self.cdp_manager = None
+        else:
+            await self.browser_context.close()
+        utils.logger.info("[DouYinCrawler.close] Browser context closed ...")
+
+    async def get_aweme_media(self, aweme_item: Dict):
+        """
+        获取抖音媒体，自动判断媒体类型是短视频还是帖子图片并下载
+
+        Args:
+            aweme_item (Dict): 抖音作品详情
+        """
+        if not config.ENABLE_GET_MEIDAS:
+            utils.logger.info(f"[DouYinCrawler.get_aweme_media] Crawling image mode is not enabled")
+            return
+        # List of note urls. If it is a short video type, an empty list will be returned.
+        note_download_url: List[str] = douyin_store._extract_note_image_list(aweme_item)
+        # The video URL will always exist, but when it is a short video type, the file is actually an audio file.
+        video_download_url: str = douyin_store._extract_video_download_url(aweme_item)
+        # TODO: Douyin does not adopt the audio and video separation strategy, so the audio can be separated from the original video and will not be extracted for the time being.
+        if note_download_url:
+            await self.get_aweme_images(aweme_item)
+        else:
+            await self.get_aweme_video(aweme_item)
+
+    async def get_aweme_images(self, aweme_item: Dict):
+        """
+        get aweme images. please use get_aweme_media
+
+        Args:
+            aweme_item (Dict): 抖音作品详情
+        """
+        if not config.ENABLE_GET_MEIDAS:
+            return
+        aweme_id = aweme_item.get("aweme_id")
+        # List of note urls. If it is a short video type, an empty list will be returned.
+        note_download_url: List[str] = douyin_store._extract_note_image_list(aweme_item)
+
+        if not note_download_url:
+            return
+        picNum = 0
+        for url in note_download_url:
+            if not url:
+                continue
+            content = await self.dy_client.get_aweme_media(url)
+            await asyncio.sleep(random.random())
+            if content is None:
+                continue
+            extension_file_name = f"{picNum:>03d}.jpeg"
+            picNum += 1
+            await douyin_store.update_dy_aweme_image(aweme_id, content, extension_file_name)
+
+    async def get_aweme_video(self, aweme_item: Dict):
+        """
+        get aweme videos. please use get_aweme_media
+
+        Args:
+            aweme_item (Dict): 抖音作品详情
+        """
+        if not config.ENABLE_GET_MEIDAS:
+            return
+        aweme_id = aweme_item.get("aweme_id")
+
+        # The video URL will always exist, but when it is a short video type, the file is actually an audio file.
+        video_download_url: str = douyin_store._extract_video_download_url(aweme_item)
+
+        if not video_download_url:
+            return
+        content = await self.dy_client.get_aweme_media(video_download_url)
+        await asyncio.sleep(random.random())
+        if content is None:
+            return
+        extension_file_name = f"video.mp4"
+        await douyin_store.update_dy_aweme_video(aweme_id, content, extension_file_name)

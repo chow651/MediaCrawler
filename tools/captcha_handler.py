@@ -33,7 +33,7 @@ class CaptchaHandler:
     """验证码处理器"""
     
     # 常见验证码元素选择器
-    CAPTCHA_SELECTORS = [
+    CAPTCHA_SELECTORS = (
         # 极验
         ".geetest_panel",
         ".geetest_widget",
@@ -53,7 +53,7 @@ class CaptchaHandler:
         ".captcha_verify_container",
         "#captcha_container",
         ".verify-captcha",
-    ]
+    )
     
     def __init__(
         self,

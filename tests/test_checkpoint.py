@@ -48,8 +48,7 @@ class TestCheckpointManagerInit:
         assert checkpoint_manager.save_interval == 5
         assert len(checkpoint_manager.processed_ids) == 0
         assert len(checkpoint_manager.session_ids) == 0
-        assert checkpoint_manager.search_offset == 0
-        assert checkpoint_manager.current_keyword is None
+        assert checkpoint_manager.search_offsets == {}
 
 
 class TestIsProcessed:
@@ -103,8 +102,7 @@ class TestSetSearchState:
     def test_set_search_state(self, checkpoint_manager):
         """测试设置搜索状态"""
         checkpoint_manager.set_search_state("keyword1", 100)
-        assert checkpoint_manager.current_keyword == "keyword1"
-        assert checkpoint_manager.search_offset == 100
+        assert checkpoint_manager.search_offsets["keyword1"] == 100
 
     def test_get_search_offset(self, checkpoint_manager):
         """测试获取搜索偏移量"""
@@ -121,8 +119,7 @@ class TestGetStats:
         stats = checkpoint_manager.get_stats()
         assert stats["total_processed"] == 0
         assert stats["session_processed"] == 0
-        assert stats["search_offset"] == 0
-        assert stats["current_keyword"] is None
+        assert stats["search_offsets"] == {}
 
     def test_stats_after_operations(self, checkpoint_manager):
         """测试操作后的统计"""
@@ -133,8 +130,7 @@ class TestGetStats:
         stats = checkpoint_manager.get_stats()
         assert stats["total_processed"] == 2
         assert stats["session_processed"] == 2
-        assert stats["search_offset"] == 50
-        assert stats["current_keyword"] == "keyword1"
+        assert stats["search_offsets"] == {"keyword1": 50}
 
 
 class TestSaveAndClose:
@@ -176,8 +172,7 @@ class TestClear:
 
         assert len(checkpoint_manager.processed_ids) == 0
         assert len(checkpoint_manager.session_ids) == 0
-        assert checkpoint_manager.search_offset == 0
-        assert checkpoint_manager.current_keyword is None
+        assert checkpoint_manager.search_offsets == {}
 
         checkpoint_file = Path(temp_checkpoint_dir) / "dy_search_checkpoint.json"
         assert not checkpoint_file.exists()
@@ -195,8 +190,7 @@ class TestLoadCheckpoint:
             "platform": "dy",
             "crawler_type": "search",
             "processed_ids": ["id_1", "id_2", "id_3"],
-            "search_offset": 30,
-            "current_keyword": "test",
+            "search_offsets": {"test": 30},
         }
         with open(checkpoint_file, "w", encoding="utf-8") as f:
             json.dump(data, f)
@@ -209,8 +203,7 @@ class TestLoadCheckpoint:
         )
 
         assert len(manager.processed_ids) == 3
-        assert manager.search_offset == 30
-        assert manager.current_keyword == "test"
+        assert manager.search_offsets == {"test": 30}
 
     def test_load_nonexistent_checkpoint(self, temp_checkpoint_dir):
         """测试加载不存在的断点"""

@@ -132,7 +132,8 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
                 raise Exception("account blocked")
             return response.json()
         except Exception as e:
-            raise DataFetchError(f"{e}, {response.text}")
+            status_code = getattr(response, "status_code", 0)
+            raise DataFetchError(f"{e}, {response.text}", status_code=status_code)
 
     async def get(self, uri: str, params: Optional[Dict] = None, headers: Optional[Dict] = None):
         """

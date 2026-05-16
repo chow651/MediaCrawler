@@ -40,7 +40,9 @@ DY_SPECIFIED_ID_LIST = [
 # 1. Complete creator homepage URL: "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main"
 # 2. sec_user_id: "MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE"
 DY_CREATOR_ID_LIST = [
-    "https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?from_tab_name=main",
-    "MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE"
+    # 管清友 - 经济学家、如是金融研究院院长
+    "https://www.douyin.com/user/MS4wLjABAAAATkb4dkroRPa0Y_JoovpP4BwE42JMIe7Pm4Het7ndOmA",
+    # 李大霄 - 中国证券业协会首席经济学家委员会委员
+    "https://www.douyin.com/user/MS4wLjABAAAAz-Nssy-G6nNshJODTK3VpEpjWsH1pMHODDPexGS5K-D6EAo5iASK_qCGRb7M5Rbe",
     # ........................
 ]

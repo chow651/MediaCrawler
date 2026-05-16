@@ -8,7 +8,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Optional, Set
+from typing import Dict, Optional, Set
 from tools import utils
 
 
@@ -38,10 +38,8 @@ class CheckpointManager:
         self.processed_ids: Set[str] = set()
         # 当前会话新增的ID
         self.session_ids: Set[str] = set()
-        # 当前关键词（用于搜索模式）
-        self.current_keyword: Optional[str] = None
-        # 搜索模式的偏移量
-        self.search_offset: int = 0
+        # 搜索模式偏移量（按关键词独立存储）
+        self.search_offsets: Dict[str, int] = {}
         # 最后保存时间
         self.last_save_time: float = 0.0
         # 操作计数
@@ -68,12 +66,16 @@ class CheckpointManager:
                     data = json.load(f)
                 
                 self.processed_ids = set(data.get("processed_ids", []))
-                self.search_offset = data.get("search_offset", 0)
-                self.current_keyword = data.get("current_keyword")
+                # 兼容旧格式（单值 search_offset）和新格式（字典 search_offsets）
+                if "search_offsets" in data:
+                    self.search_offsets = data["search_offsets"]
+                elif "search_offset" in data:
+                    kw = data.get("current_keyword", "default")
+                    self.search_offsets = {kw: data["search_offset"]}
                 
                 utils.logger.info(
                     f"[Checkpoint] 加载断点成功: {len(self.processed_ids)} 个已处理ID, "
-                    f"偏移量: {self.search_offset}"
+                    f"偏移量: {self.search_offsets}"
                 )
             except Exception as e:
                 utils.logger.warning(f"[Checkpoint] 加载断点失败: {e}")
@@ -88,8 +90,7 @@ class CheckpointManager:
                 "platform": self.platform,
                 "crawler_type": self.crawler_type,
                 "processed_ids": list(self.processed_ids),
-                "search_offset": self.search_offset,
-                "current_keyword": self.current_keyword,
+                "search_offsets": self.search_offsets,
                 "last_save_time": time.time(),
                 "total_count": len(self.processed_ids),
             }
@@ -125,22 +126,18 @@ class CheckpointManager:
     
     def set_search_state(self, keyword: str, offset: int):
         """设置搜索状态"""
-        self.current_keyword = keyword
-        self.search_offset = offset
-    
+        self.search_offsets[keyword] = offset
+
     def get_search_offset(self, keyword: str) -> int:
         """获取指定关键词的搜索偏移量"""
-        if self.current_keyword == keyword:
-            return self.search_offset
-        return 0
+        return self.search_offsets.get(keyword, 0)
     
     def get_stats(self) -> dict:
         """获取统计信息"""
         return {
             "total_processed": len(self.processed_ids),
             "session_processed": len(self.session_ids),
-            "search_offset": self.search_offset,
-            "current_keyword": self.current_keyword,
+            "search_offsets": self.search_offsets,
         }
     
     def save_and_close(self):
@@ -156,8 +153,7 @@ class CheckpointManager:
         """清空断点"""
         self.processed_ids.clear()
         self.session_ids.clear()
-        self.search_offset = 0
-        self.current_keyword = None
+        self.search_offsets.clear()
         
         checkpoint_file = self._get_checkpoint_file()
         if checkpoint_file.exists():

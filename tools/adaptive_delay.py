@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import random
 import time
 from typing import Optional
 from tools import utils
@@ -87,22 +88,22 @@ class AdaptiveDelay:
     
     def on_error(self, status_code: int = 0):
         """请求错误时调用"""
-        self.consecutive_errors += 1
         self.consecutive_success = 0
         self.total_requests += 1
-        
+
         if status_code == 429:
             self.on_rate_limit()
-        elif status_code in (403, 401):
-            # 被封禁或未授权，大幅增加延迟
-            self.current_delay = self._clamp_delay(
-                self.current_delay * self.backoff_factor * 2
-            )
-        elif status_code >= 500:
-            # 服务器错误，适度增加延迟
-            self.current_delay = self._clamp_delay(
-                self.current_delay * 1.5
-            )
+        else:
+            self.consecutive_errors += 1
+            self.total_errors += 1
+            if status_code in (403, 401):
+                self.current_delay = self._clamp_delay(
+                    self.current_delay * self.backoff_factor * 2
+                )
+            elif status_code >= 500:
+                self.current_delay = self._clamp_delay(
+                    self.current_delay * 1.5
+                )
     
     async def wait(self):
         """执行自适应等待"""
@@ -112,7 +113,7 @@ class AdaptiveDelay:
             
             if remaining > 0:
                 # 添加随机抖动，避免固定间隔被识别
-                jitter = remaining * 0.2 * (2 * asyncio.get_event_loop().time() % 1 - 0.5)
+                jitter = remaining * 0.2 * (random.random() * 2 - 1)
                 wait_time = max(0, remaining + jitter)
                 
                 if wait_time > 0:
