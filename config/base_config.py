@@ -18,17 +18,17 @@
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
 # Basic configuration
-PLATFORM = "xhs"  # Platform, xhs | dy | ks | bili | wb | tieba | zhihu
+PLATFORM = "dy"  # Platform, xhs | dy | ks | bili | wb | tieba | zhihu
 
 # 是否使用海外版小红书 (rednote.com)
 # 开启后 API 走 webapi.rednote.com，cookie 域使用 .rednote.com
 XHS_INTERNATIONAL = False
 
-KEYWORDS = "编程副业,编程兼职"  # Keyword search configuration, separated by English commas
+KEYWORDS = "财经博主,股票分析,A股"  # Keyword search configuration, separated by English commas
 LOGIN_TYPE = "qrcode"  # qrcode or phone or cookie
 COOKIES = ""
 CRAWLER_TYPE = (
-    "search"  # Crawling type, search (keyword search) | detail (post details) | creator (creator homepage data)
+    "creator"  # Crawling type, search (keyword search) | detail (post details) | creator (creator homepage data)
 )
 # Whether to enable IP proxy
 ENABLE_IP_PROXY = False
@@ -52,7 +52,7 @@ SAVE_LOGIN_STATE = True
 # 是否启用 CDP 模式 - 使用用户本地的 Chrome/Edge 浏览器进行爬取，具有更好的反检测能力
 # 开启后，会自动检测并启动用户的 Chrome/Edge 浏览器，通过 CDP 协议进行控制
 # 该方式使用真实浏览器环境，包括用户的扩展、Cookie 和设置，大幅降低被风控检测的风险
-ENABLE_CDP_MODE = True
+ENABLE_CDP_MODE = False
 
 # CDP 调试端口，用于与浏览器通信
 # 如果端口被占用，系统会自动尝试下一个可用端口
@@ -95,7 +95,7 @@ USER_DATA_DIR = "%s_user_data_dir"  # %s will be replaced by platform name
 START_PAGE = 1
 
 # Control the number of crawled videos/posts
-CRAWLER_MAX_NOTES_COUNT = 15
+CRAWLER_MAX_NOTES_COUNT = 30
 
 # Controlling the number of concurrent crawlers
 MAX_CONCURRENCY_NUM = 1
@@ -107,7 +107,7 @@ ENABLE_GET_MEIDAS = False
 ENABLE_GET_COMMENTS = True
 
 # Control the number of crawled first-level comments (single video/post)
-CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES = 10
+CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES = 150
 
 # Whether to enable the mode of crawling second-level comments. By default, crawling of second-level comments is not enabled.
 # If the old version of the project uses db, you need to refer to schema/tables.sql line 287 to add table fields.
@@ -143,3 +143,49 @@ from .ks_config import *
 from .weibo_config import *
 from .tieba_config import *
 from .zhihu_config import *
+
+# ==================== 自适应延迟配置 ====================
+# 是否启用自适应请求频率控制
+ENABLE_ADAPTIVE_DELAY = True
+
+# 基础延迟秒数（替代原来的 CRAWLER_MAX_SLEEP_SEC）
+ADAPTIVE_BASE_DELAY = 2.0
+
+# 最小延迟秒数
+ADAPTIVE_MIN_DELAY = 0.5
+
+# 最大延迟秒数（触发限流时的最大退避）
+ADAPTIVE_MAX_DELAY = 30.0
+
+# 触发限流时的退避倍数
+ADAPTIVE_BACKOFF_FACTOR = 2.0
+
+# 连续成功后的恢复倍数
+ADAPTIVE_RECOVERY_FACTOR = 0.5
+
+# 触发恢复所需的连续成功次数
+ADAPTIVE_SUCCESS_THRESHOLD = 5
+
+# ==================== 断点续爬配置 ====================
+# 是否启用断点续爬
+ENABLE_CHECKPOINT = True
+
+# 断点文件存储目录
+CHECKPOINT_DIR = "checkpoint"
+
+# 每处理多少条记录保存一次断点
+CHECKPOINT_SAVE_INTERVAL = 10
+
+# ==================== 验证码处理配置 ====================
+# 是否启用验证码检测
+ENABLE_CAPTCHA_DETECTION = True
+
+# 验证码处理策略: pause(暂停等待人工), retry(刷新重试), skip(跳过当前), abort(终止)
+CAPTCHA_STRATEGY = "pause"
+
+# 暂停策略下的最大等待时间（秒）
+CAPTCHA_MAX_WAIT_TIME = 300
+
+# 重试策略下的最大重试次数
+CAPTCHA_MAX_RETRIES = 3
+

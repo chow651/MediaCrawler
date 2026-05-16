@@ -37,6 +37,9 @@ from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
 from store import douyin as douyin_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
+from tools.adaptive_delay import AdaptiveDelay
+from tools.checkpoint import CheckpointManager
+from tools.captcha_handler import CaptchaHandler, CaptchaStrategy
 from var import crawler_type_var, source_keyword_var
 
 from .client import DouYinClient
@@ -63,6 +66,11 @@ class DouYinCrawler(AbstractCrawler):
         ]
         self.cdp_manager = None
         self.ip_proxy_pool = None  # Proxy IP pool for automatic proxy refresh
+
+        # 增强模块
+        self.delay_controller = None
+        self.checkpoint_manager = None
+        self.captcha_handler = None
 
     async def start(self) -> None:
         playwright_proxy_format, httpx_proxy_format = None, None
@@ -122,6 +130,15 @@ class DouYinCrawler(AbstractCrawler):
                 # Get the information and comments of the specified creator
                 await self.get_creators_and_videos()
 
+            # 输出统计信息
+            if self.checkpoint_manager:
+                self.checkpoint_manager.save_and_close()
+                stats = self.checkpoint_manager.get_stats()
+                utils.logger.info(f"[DouYinCrawler] 断点统计: {stats}")
+            if self.delay_controller:
+                stats = self.delay_controller.get_stats()
+                utils.logger.info(f"[DouYinCrawler] 延迟统计: {stats}")
+
             utils.logger.info("[DouYinCrawler.start] Douyin Crawler finished ...")
 
     async def search(self) -> None:
@@ -130,11 +147,33 @@ class DouYinCrawler(AbstractCrawler):
         if config.CRAWLER_MAX_NOTES_COUNT < dy_limit_count:
             config.CRAWLER_MAX_NOTES_COUNT = dy_limit_count
         start_page = config.START_PAGE  # start page number
+
+        # 初始化增强模块
+        if config.ENABLE_CHECKPOINT:
+            self.checkpoint_manager = CheckpointManager(
+                platform="dy",
+                crawler_type="search",
+                checkpoint_dir=config.CHECKPOINT_DIR,
+                save_interval=config.CHECKPOINT_SAVE_INTERVAL,
+            )
+        if config.ENABLE_ADAPTIVE_DELAY:
+            self.delay_controller = AdaptiveDelay(
+                base_delay=config.ADAPTIVE_BASE_DELAY,
+                min_delay=config.ADAPTIVE_MIN_DELAY,
+                max_delay=config.ADAPTIVE_MAX_DELAY,
+            )
+
         for keyword in config.KEYWORDS.split(","):
             source_keyword_var.set(keyword)
             utils.logger.info(f"[DouYinCrawler.search] Current keyword: {keyword}")
             aweme_list: List[str] = []
             page = 0
+            # 断点恢复：读取该关键词的搜索偏移量
+            if self.checkpoint_manager:
+                saved_offset = self.checkpoint_manager.get_search_offset(keyword)
+                if saved_offset > 0:
+                    page = saved_offset // dy_limit_count
+                    utils.logger.info(f"[DouYinCrawler.search] 从断点恢复 keyword={keyword} page={page}")
             dy_search_id = ""
             while (page - start_page + 1) * dy_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
                 if page < start_page:
@@ -143,6 +182,11 @@ class DouYinCrawler(AbstractCrawler):
                     continue
                 try:
                     utils.logger.info(f"[DouYinCrawler.search] search douyin keyword: {keyword}, page: {page}")
+
+                    # 自适应延迟
+                    if self.delay_controller:
+                        await self.delay_controller.wait()
+
                     posts_res = await self.dy_client.search_info_by_keyword(
                         keyword=keyword,
                         offset=page * dy_limit_count - dy_limit_count,
@@ -152,9 +196,16 @@ class DouYinCrawler(AbstractCrawler):
                     if posts_res.get("data") is None or posts_res.get("data") == []:
                         utils.logger.info(f"[DouYinCrawler.search] search douyin keyword: {keyword}, page: {page} is empty,{posts_res.get('data')}`")
                         break
-                except DataFetchError:
-                    utils.logger.error(f"[DouYinCrawler.search] search douyin keyword: {keyword} failed")
+                except DataFetchError as e:
+                    utils.logger.error(f"[DouYinCrawler.search] search douyin keyword: {keyword} failed, error: {e}")
+                    if self.delay_controller:
+                        status_code = getattr(e, "status_code", 0)
+                        self.delay_controller.on_error(status_code=status_code)
                     break
+
+                # 请求成功
+                if self.delay_controller:
+                    self.delay_controller.on_success()
 
                 page += 1
                 if "data" not in posts_res:
@@ -167,10 +218,21 @@ class DouYinCrawler(AbstractCrawler):
                         aweme_info: Dict = (post_item.get("aweme_info") or post_item.get("aweme_mix_info", {}).get("mix_items")[0])
                     except TypeError:
                         continue
-                    aweme_list.append(aweme_info.get("aweme_id", ""))
-                    page_aweme_list.append(aweme_info.get("aweme_id", ""))
+                    aweme_id = aweme_info.get("aweme_id", "")
+
+                    # 断点检查：跳过已处理的
+                    if self.checkpoint_manager and self.checkpoint_manager.is_processed(aweme_id):
+                        utils.logger.debug(f"[DouYinCrawler.search] Skip processed: {aweme_id}")
+                        continue
+
+                    aweme_list.append(aweme_id)
+                    page_aweme_list.append(aweme_id)
                     await douyin_store.update_douyin_aweme(aweme_item=aweme_info)
                     await self.get_aweme_media(aweme_item=aweme_info)
+
+                    # 标记为已处理
+                    if self.checkpoint_manager:
+                        self.checkpoint_manager.mark_processed(aweme_id)
                 
                 # Batch get note comments for the current page
                 await self.batch_get_note_comments(page_aweme_list)
@@ -178,6 +240,11 @@ class DouYinCrawler(AbstractCrawler):
                 # Sleep after each page navigation
                 await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
                 utils.logger.info(f"[DouYinCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
+
+                # 断点保存：记录搜索进度
+                if self.checkpoint_manager:
+                    self.checkpoint_manager.set_search_state(keyword, page * dy_limit_count)
+
             utils.logger.info(f"[DouYinCrawler.search] keyword:{keyword}, aweme_list:{aweme_list}")
 
     async def get_specified_awemes(self):
@@ -274,6 +341,10 @@ class DouYinCrawler(AbstractCrawler):
         utils.logger.info("[DouYinCrawler.get_creators_and_videos] Begin get douyin creators")
         utils.logger.info("[DouYinCrawler.get_creators_and_videos] Parsing creator URLs...")
 
+        # 计算今天的日期（时间戳）
+        import time
+        today_start = int(time.time()) - 86400  # 24小时前的时间戳
+
         for creator_url in config.DY_CREATOR_ID_LIST:
             try:
                 creator_info_parsed = parse_creator_info_from_url(creator_url)
@@ -290,8 +361,27 @@ class DouYinCrawler(AbstractCrawler):
             # Get all video information of the creator
             all_video_list = await self.dy_client.get_all_user_aweme_posts(sec_user_id=user_id, callback=self.fetch_creator_video_detail)
 
-            video_ids = [video_item.get("aweme_id") for video_item in all_video_list]
-            await self.batch_get_note_comments(video_ids)
+            utils.logger.info(f"[DouYinCrawler.get_creators_and_videos] Got {len(all_video_list)} videos from API")
+
+            # 筛选今天发布的视频
+            today_videos = []
+            for video_item in all_video_list:
+                create_time = video_item.get("create_time", 0)
+                if create_time >= today_start:
+                    today_videos.append(video_item)
+                    utils.logger.info(f"[DouYinCrawler.get_creators_and_videos] ✅ Found today's video: {video_item.get('aweme_id')}")
+
+            utils.logger.info(f"[DouYinCrawler.get_creators_and_videos] Found {len(today_videos)} videos from today out of {len(all_video_list)} total")
+
+            video_ids = [video_item.get("aweme_id") for video_item in today_videos]
+            utils.logger.info(f"[DouYinCrawler.get_creators_and_videos] Will fetch comments for {len(video_ids)} videos: {video_ids}")
+
+            if video_ids:
+                utils.logger.info(f"[DouYinCrawler.get_creators_and_videos] Calling batch_get_note_comments...")
+                await self.batch_get_note_comments(video_ids)
+                utils.logger.info(f"[DouYinCrawler.get_creators_and_videos] batch_get_note_comments completed")
+            else:
+                utils.logger.warning(f"[DouYinCrawler.get_creators_and_videos] No today's videos found, skipping comments")
 
     async def fetch_creator_video_detail(self, video_list: List[Dict]):
         """
